@@ -1,1 +1,1 @@
-{ "plugins": ["-highlight", "sunlight-highlighter"] }
+{ "plugins": ["highlight"] }
