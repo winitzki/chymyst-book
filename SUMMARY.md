@@ -1,6 +1,6 @@
-# Summary
+e# Summary
 
-* [Preface](README.md)
+* [Preface](chymyst-preface.md)
 * [Chapter 0: Quick start](chymyst-quick.md)
 * [Chapter 1: The chemical machine paradigm](chymyst01.md)
 * [Chapter 2: Readers/Writers, Map/Reduce, and Merge-Sort](chymyst02.md)
