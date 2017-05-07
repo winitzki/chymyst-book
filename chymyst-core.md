@@ -130,13 +130,19 @@ The status value will be `true` only if the caller has actually received the rep
 
 ## Debugging
 
-Molecule emitters have the method `setLogLevel`, which is by default set to 0.
-Positive values will lead to more debugging output.
+Molecule emitters have the method `setLogLevel`, which is by default set to `-1`.
+Nonnegative values will lead to more debugging output:
+
+- level 0 will print all internal error messages and exceptions occurring within reactions
+- level 1 will print messages about scheduling and starting reactions 
+- level 2 will print messages about emitting molecules and removing blocking molecules after timeout
+- level 3 will print messages about molecules remaining after starting a reaction, as well as messages about no reactions started 
 
 The log level will affect the entire reaction site to which the molecule is bound.
 
 ```scala
 val x = m[Int]
+site(...) // consuming x
 x.setLogLevel(2)
 
 ```
@@ -185,13 +191,74 @@ Here is an example with pattern-matching on non-blocking molecules `c` and `d` t
 val c = m[Option[Int]] // non-blocking molecule
 val d = m[(Int, String, Boolean)] // non-blocking molecule
 
-val reaction = go { case c(Some(x)) + d((y, "hello", true)) if x == y => c(Some(y)) }
+val reaction = go { case c(Some(x)) + d((y, "hello", true)) if x == y ⇒ c(Some(y)) }
 
 ```
 
+Pattern-matching is a particular case of a guard condition that constrains the values of a reaction's input molecules.
+A reaction can have guard conditions of three types:
+
+1. Molecule predicates
+2. Cross-molecule guards
+3. Static guards
+
+The chemical machine will run a reaction only if it can find suitable input molecules such that all the guard conditions hold.
+
+#### Molecule predicates
+
+Molecule predicates are conditions that constrain the value carried by a single input molecule.
+For example,
+
+```scala
+go { case a(x) + c(y) if x > 0 ⇒ ??? }
+
+```
+
+declares a guard condition that constrains the input molecule value `x`.
+We call this a **molecule predicate** for the input molecule `a(x)`.
+
+Another example of a molecule predicate is
+
+```scala
+go { case a(Some(x)) + c(y) ⇒ ??? }
+
+```
+
+The requirement that the value of the molecule `a()` should be of the form `Some(x)` is a molecule predicate
+because it constrains only the value of one molecule.
+
+#### Cross-molecule guards
+
+Cross-molecule guards are conditions that constrain _several_ molecule values at once.
+An example is
+
+```scala
+go { case a(x) + c(y) if x > y ⇒ ??? }
+
+```
+
+As a rule, the chemical machine will schedule such reactions more slowly because it must find a pair of molecule copies `a(x)` and `c(y)` such that the condition holds.
+If many copies of `a()` and `c()` are present in the soup, the search for a suitable pair can take a long time.
+
+#### Static guards
+
+Static guards are conditions that are independent of input molecule values.
+For example,
+
+```scala
+go { case a(x) if someCond(n) > 0 ⇒ ??? }
+
+```
+
+declares a static guard `someCond(n) > 0` that depends on an externally defined function `someCond()` and an externally defined value `n`.
+Neither `someCond` nor `n` are input molecule values; they must be defined in an outer scope. 
+
+Note that the chemical machine may need to evaluate the static guard multiple times even if the reaction will not be started due to failure of other conditions.
+For this reason, static guards must be pure functions without side effects. 
+
 ### Pattern-matching of blocking molecules
 
-The syntax for matching on blocking molecules requires a two-place matcher, such as `f(x,y)`, unlike the one-place matchers for non-blocking molecules such as `c(x)`.
+The syntax for matching on blocking molecules requires a two-place matcher, such as `f(x, r)`, unlike the one-place matchers for non-blocking molecules such as `c(x)`.
 
 ```scala
 val c = m[Option[Int]] // non-blocking molecule
@@ -206,7 +273,7 @@ val result = f(123) // emit f(123), get reply value of type String
 In this reaction, the pattern-match on `f(y, r)` involves _two_ pattern variables:
 
 - The pattern variable `y` is of type `Int` and matches the value carried by the emitted molecule `f(123)`
-- The pattern variable `r` is of type `Int => String` and matches a **reply emitter** — a function object that emits a reply aimed at the caller of `f(123)`.
+- The pattern variable `r` is of type `Int => String` and matches a **reply emitter** — a function object that emits a reply aimed at the process that emits `f(123)`.
 
 Calling `r` as `r(x.toString)` will perform the reply action, sending the value of `x.toString` back to the calling process, which has been blocked by emitting `f(123)`.
 The reply action will unblock the calling process concurrently with continuing to evaluate the reaction body.
@@ -233,10 +300,9 @@ go { case f(_) = ... } // Same error message
 
 ## Reaction sites
 
-Writing a reaction site (RS) will at once activate molecules and reactions.
-Until an RS is written, molecules cannot be emitted, and no reactions will start.
+Creating a reaction site (RS) is the way to define some molecules and reactions jointly.
 
-Reaction sites are written with the `site` method:
+Reaction sites are created with the `site()` call:
 
 ```scala
 site(reaction1, reaction2, reaction3, ...)
@@ -246,14 +312,16 @@ site(reaction1, reaction2, reaction3, ...)
 A reaction site can take any number of reactions.
 With Scala's `:_*` syntax, an RS can also take a sequence of reactions.
 
-All reactions listed in the RS will be activated at once.
-
 Whenever we emit any molecule that is used as input to one of these reactions, it is _this_ RS (and no other) that will decide which reactions to run.
 For this reason, we say that those molecules are **bound** to this RS, or that they are **consumed** at that RS, or that they are **input molecules** at this RS.
 To build intuition, we can imagine that each molecule must travel to its reaction site in order to start a reaction.
 When a reaction requires several input molecules, the molecule will wait at the reaction site for the arrival of other molecules.
 
-Here is an example of an RS:
+Values of type `Reaction` are declarative descriptions of chemistry.
+When a reaction site is created, it activates the given reactions and binds their input molecules.
+Until then, these molecules cannot be emitted, and no reactions will start.
+
+Here is an example of an RS where reactions are written inline as the arguments to the `site()` call:
 
 ```scala
 val c = new M[Int]("counter")
@@ -268,19 +336,21 @@ site(
 
 ```
 
-In this RS, the input molecules are `c`, `d`, and `i`, while the output molecules are `c` and `f`.
-We say that the molecules `c`, `d`, and `i` are consumed at this RS, or that they are bound to it.
+In this RS, the input molecules are `c()`, `d()`, and `i()`, while the output molecules are `c()` and `f()`.
+The molecules `c()`, `d()`, and `i()` are consumed at this RS, which is the same as to say that they are **bound** to it.
 
-Note that `f` is not consumed at this RS; we will need to write another RS where `f` will be consumed.
+Note that `f()` is not consumed by any reactions at this RS.
+Therefore, `f()` is not bound to this RS; we will need to create another RS where `f()` will be bound.
 
-It is perfectly acceptable for a reaction to emit a molecule such as `f` that is not consumed by any reaction in this RS.
-However, if we forget to write any _other_ RS that consumes `f`, it will be a run-time error to emit `f`.
+It is perfectly acceptable for a reaction to emit a molecule such as `f()` that is not consumed by any reaction in this RS.
+However, if we forget to write any _other_ RS that consumes `f()`, it will be a run-time error to emit `f()`.
 
-As a warning, note that in the present example the molecule `f` will be emitted only if `x == 1` (and it is impossible to determine at compile time whether `x == 1` will be true at run time).
-So, if we forget to write an RS to which `f` is bound, it will be not necessarily easy to detect the error at run time!
+As a warning, note that in the present example the molecule `f()` will be emitted only if `x == 1` (and it is impossible to determine at compile time whether `x == 1` will be true at run time).
+So, if we forget to write an RS to which `f()` is bound, it will be not necessarily easy to detect the error at run time!
 
 An important requirement for reaction sites is that any given molecule must be bound to one and only one reaction site.
 It is a run-time error to write reactions consuming the same molecule in different reaction sites.
+(This error will occur before any reactions are run.)
 
 An example of this error would be writing the previous RS as two separate ones:
 
@@ -296,30 +366,31 @@ site(
 
 site(
   go { case c(x) + i(_) => c(x + 1) }
-) // run-time error: "c" is already bound to another RS
+)
+// throws java.lang.Exception:
+// "Molecule c cannot be used as input in Site{c + i → ...} since it is already bound to Site{c + d → ...}"
 
 ```
 
 This rule enforces the immutability of chemical laws:
-Once a reaction site is written, we have fixed the reactions that a given molecule could initiate (i.e. the reactions that consume this molecule).
-It is impossible to add a new reaction that consumes a molecule if that molecule is already bound to another RS.
+Once a reaction site is created, we have fixed the reactions that a given molecule could initiate (i.e. the reactions that **consume** this molecule).
+Once a molecule is bound to some RS, it is impossible to add a new reaction that consumes that molecule (either at the same RS, or by creating a new RS).
 
-This feature of the chemical machine allows us to create a library of reactions and guarantee that user programs will not be able to modify the intended flow of reactions.
+This feature of the chemical machine allows us to create a library of reactions with a guarantee that user programs will not be able to modify the intended flow of reactions.
 
 Also, because of this rule, different reaction sites do not contend on input molecules.
-The decisions about which reactions to start are local to each RS.
-
+In other words, the decisions about which reactions to start are local to each RS.
 
 # Debugging the flow of reactions
 
 It is sometimes not easy to make sure that the reactions are correctly designed.
 The library offers some debugging facilities:
 
-- each molecule is named
-- a macro is available to assign names automatically
-- the user can set a log level on each reaction site
+- each molecule is named;
+- a macro is available to assign names automatically;
+- the user can set a log level on each reaction site.
  
- Here are the typical results:
+Here is some typical debug output from running some reactions:
 
 ```scala
 import io.chymyst.jc._
@@ -343,49 +414,49 @@ counter.toString // returns the string "counter"
 
 decr() + decr() + decr()
 /* This prints:
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(5), decr()
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules decr()
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + decr => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs decr(), counter(5)
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules decr() * 2
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + decr => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 547
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(4) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(4), decr() * 2
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + decr => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs decr(), counter(4)
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + decr => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 548
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(3) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(3), decr()
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + decr => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs decr(), counter(3)
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + decr => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 549
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(2) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(2)
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules counter(5), decr()
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules decr()
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + decr → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs decr(), counter(5)
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules decr() * 2
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + decr → ...} started with thread id 547
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(4), now have molecules counter(4), decr() * 2
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + decr → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs decr(), counter(4)
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + decr → ...} started with thread id 548
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(3), now have molecules counter(3), decr()
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + decr → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs decr(), counter(3)
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + decr → ...} started with thread id 549
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(2), now have molecules counter(2)
 
 */
 println(counter.logSoup)
 /* This prints:
- Site{counter + decr => ...; counter + get/S => ...}
+ Site{counter + decr → ...; counter + get/S → ...}
  Molecules: counter(2)
  */
 decr() + decr() + decr()
 /* This prints:
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(2), decr()
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + decr => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs decr(), counter(2)
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules decr()
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting decr() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules decr() * 2
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + decr => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 613
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(1) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(1), decr() * 2
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + decr => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs decr(), counter(1)
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + decr => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 548
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(0) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(0), decr()
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules counter(2), decr()
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + decr → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs decr(), counter(2)
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules decr()
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting decr(), now have molecules decr() * 2
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + decr → ...} started with thread id 613
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(1), now have molecules counter(1), decr() * 2
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + decr → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs decr(), counter(1)
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + decr → ...} started with thread id 548
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(0), now have molecules counter(0), decr()
 */
 println(counter.logSoup)
 /* This prints:
- Site{counter + decr => ...; counter + get/S => ...}
+ Site{counter + decr → ...; counter + get/S → ...}
  Molecules: counter(0), decr()
  */
 
 val x = get()
-/* This results in x = 0 and prints:
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting get/S() on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(0), decr(), get/S()
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: starting reaction {counter + get/S => ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while on thread pool io.chymyst.jc.SitePool@36ce2e5d with inputs counter(0), get/S()
-Debug: In Site{counter + decr => ...; counter + get/S => ...}: reaction {counter + get/S => ...} started on thread pool io.chymyst.jc.SitePool@36ce2e5d with thread id 549
-Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(0) on thread pool io.chymyst.jc.SitePool@36ce2e5d, now have molecules counter(0), decr()
+/* This results in setting x = 0 and also prints:
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting get/S(), now have molecules counter(0), decr(), get/S()
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: scheduling reaction {counter + get/S → ...} on thread pool io.chymyst.jc.ReactionPool@57efee08 while with inputs counter(0), get/S()
+Debug: In Site{counter + decr → ...; counter + get/S → ...}: reaction {counter + get/S → ...} started with thread id 549
+Debug: Site{counter + decr → ...; counter + get/S → ...} emitting counter(0), now have molecules counter(0), decr()
 */
 ```
 
@@ -393,11 +464,11 @@ Debug: Site{counter + decr => ...; counter + get/S => ...} emitting counter(0) o
 
 There are two kinds of tasks that `Chymyst Core` performs concurrently:
 
-- running reactions
-- emitting new molecules and deciding which reactions will run next
+- running reactions;
+- emitting new molecules and deciding which reactions will run next.
 
 Each RS is a local value and is separate from all other RSs.
-So, in principle all RSs can perform their tasks fully concurrently and independently from each other.
+So, if enough CPU cores are available, all RSs can perform their tasks fully concurrently and independently from each other.
 
 In practice, there are situations where we need to force certain reactions to run on certain threads.
 For example, user interface (UI) programming frameworks typically allocate one thread for all UI-related operations, such as updating the screen or receiving callbacks from user interactions.
@@ -405,27 +476,116 @@ The Android SDK, as well as JavaFX, both adopt this approach to thread managemen
 In these environments, it is a non-negotiable requirement to have control over which threads are used by which tasks.
 In particular, all screen updates (as well as all user event callbacks) must be scheduled on the single UI thread, while all long-running tasks must be delegated to specially created non-UI or "background" threads.
 
-To facilitate this control, `Chymyst` implements the thread pool feature.
+To facilitate this control, `Chymyst Core` implements the thread pool feature.
 
-Each RS uses two thread pools: a thread pool for running reactions (`reactionPool`) and a thread pool for emitting molecules and deciding new reactions (`sitePool`).
+Each RS uses a special thread pool (the `reactionPool`).
+The reaction pool contains two sets of threads:
 
-By default, these two thread pools are statically allocated and shared by all RSs.
+1. A common thread executor for running reactions. This thread executor can have one or more threads.
+2. A single, dedicated scheduler thread for deciding new reactions (called the `schedulerExecutor` in the code).
 
-Users can create custom thread pools and specify, for any given RS,
-- on which thread pool the decisions will run
-- on which thread pool each reaction will run
+By default, the reaction sites use a statically allocated reaction pool that is shared by all RSs.
+
+Users can create custom reaction pools and specify, for any given RS, on which pool each reaction will run.
+
+The dedicated scheduler thread is part of a reaction pool, although it is separate and free of contention with reaction tasks.
+If two reaction sites share their reaction pool, they also share the scheduler thread.
+
+Also note that the total number of threads in the JVM is limited to about 2,000.
+Thus, creating many thousands of new reaction pools is impossible.
 
 ## Creating a custom thread pool
 
-TODO
+A thread pool is created like this:
 
-## Specifying thread pools for reactions
+```scala
+val tp = new SmartPool(8)
 
-## Specifying thread pools for decisions
+```
+
+This initializes a thread pool with 8 initial threads.
+
+As a convenience, the method `cpuCores` can be used to determine the number of available CPU cores.
+This value is used by `SmartPool`'s default constructor.
+
+```scala
+val tp1 = new SmartPool() // same as new SmartPool(cpuCores)
+
+```
+
+Another available reaction pool is `FixedPool`.
+This pool holds a fixed, never changing number of reaction threads (and a single, dedicated scheduler thread).
+
+```scala
+val tp1 = new FixedPool(4) // 4 threads for reactions, one thread for scheduler
+
+```
+
+## Specifying thread pools for sites and reactions
+
+The `site()` call can take an additional argument that specifies a thread pool for all reactions at this RS.
+
+```scala
+val tp = new SmartPool(8)
+
+val a = m[Unit]
+val c = m[Unit]
+// etc.
+
+site(tp)(
+ go { case a(_) => ... },
+ go { case c(_) => ... },
+)
+
+```
+
+When it is desired that a particular reaction should be scheduled on a particular thread pool, the `onThreads()` method can be used.
+
+```scala
+val tp = new SmartPool(8)
+
+val tp2 = new SmartPool(2)
+
+val a = m[Unit]
+val c = m[Unit]
+// etc.
+
+site(tp)(
+ go { case a(_) => ... } onThreads tp2,
+ go { case c(_) => ... }, // this reaction will run on `tp`
+)
+
+// Wait until all done.
+tp.shutdownNow()
+tp2.shutdownNow()
+
+```
+
+By default, all sites will use the `defaultReactionPool`.
+
+If the reaction pool is specified for a particular RS, all reactions in that RS will use that thread pool, unless a reaction has its own `onTreads()` specification.
 
 ## Stopping a thread pool
 
-TODO
+Since JVM will not quit when some threads are still active, the programmer needs to stop the thread pool when all tasks are finished and no more reactions need to be run.
+
+The method `shutdownNow()` will stop the threads in the thread pool.
+
+```scala
+val tp = new SmartPool(8)
+
+site(tp)(...)
+
+// Emit molecules
+  ...
+// Now wait until all tasks are finished.
+
+tp.shutdownNow()
+
+```
+
+Thread pools also implement the `AutoCloseable` interface.
+The `close()` method is an alias to `shutdownNow()`.
 
 ## Blocking calls and thread pools
 
@@ -445,48 +605,35 @@ Example:
 ```scala
 val pool = new SmartPool(8)
 
-... 
+val a = m[Url]
+val b = m[Client]
+val c = m[Result] // whatever
 
-site(pool, defaultSitePool)(
-  go { case a(url) + b(client) =>
+site(pool)(
+  go { case a(url) + b(client) ⇒
       val result = BlockingIdle { client.callSyncHttpApi(url) }
       c(result)
     }
 )
 ```
 
-Another case when `BlockingIdle` might be useful is when a reaction contains a complicated condition that will block the RS decision thread.
-In that case, `BlockingIdle` should be used, together with a `SmartPool` for join decisions.
- 
-Example:
+The reaction scheduler (i.e. the code that decides which reaction will start next) is running on a single dedicated thread (the `schedulerExecutor`).
+User programs should avoid defining reactions with complicated conditions that could block the RS scheduler.
+For example, code like this should be avoided:
 
 ```scala
-val pool = new SmartPool(2)
+... // define molecule emitters
 
-...
-
-site(defaultReactionPool, pool)(
-  go { case a(url) + b(client) if BlockingIdle { client.callSyncHttpApi(url).isSuccessful } => ...}
+site()(
+// Guard condition executes a blocking HTTP call. Not recommended!
+  go { case a(url) + b(client) if client.callSyncHttpApi(url).isSuccessful ⇒ ...}
 )
 
 ```
 
 ## Fault tolerance and exceptions
 
-A reaction body could throw an exception of two kinds:
-
-- `ExceptionInChymyst` due to incorrect usage of `Chymyst Core` - such as, failing to perform a reply action with a blocking molecule
-- any other `Exception` in user's reaction code 
-
-The first kind of exception is generated by `Chymyst Core`  and leads to stopping the reaction and printing an error message.
-
-The second kind of exception is assumed to be generated by the user and is handled specially for reactions marked `withRetry`.
-For these reactions, `Chymyst Core` assumes that the reaction has died due to some transient malfunction and should be retried.
-Then the input molecules for the reaction are emitted again.
-This will make it possible for the reaction to restart.
-
-By default, reactions are not marked `withRetry`, and any exception thrown by the reaction body will lead to the 
-input molecules being consumed and lost.
+The fault tolerance facility is intended to help in situations when a reaction throws an exception due to a transient failure.
 
 The following syntax is used to specify fault tolerance in reactions:
 
@@ -498,8 +645,22 @@ site(
 
 ```
 
+A reaction body could throw an exception of two kinds:
+
+- `ExceptionInChymyst` due to incorrect usage of `Chymyst Core` - such as, failing to perform a reply action with a blocking molecule;
+- any other `Exception` in the code of the reaction body.
+
+The first kind of exception is generated by `Chymyst Core` and leads to stopping the reaction and printing an error message.
+
+The second kind of exception is assumed to be generated by the user and is handled specially for reactions marked `withRetry`.
+For these reactions, `Chymyst Core` assumes that the reaction has died due to some transient malfunction and could be retried.
+Then the reaction is scheduled again if it is marked `withRetry`.
+
+By default, reactions are not marked `withRetry`, and any exception thrown by the reaction body will stop the evaluation at the point of the exception.
+
 As a rule, the user cannot catch an exception thrown in a different thread.
-Therefore, it may be advisable not to use exceptions within reactions.
+Therefore, it is advisable not to allow exceptions to be thrown within reactions.
+
 If there is an operation that could intermittently throw an exception, and if it is useful to retry the reaction in that case, the best way is mark the reaction `withRetry` and to make sure that all output molecules are emitted at the end of the reaction body, after any exceptions were thrown.
 (Also, any other irreversible side effects should not happen before exceptions are thrown.)
 In this case, the retry mechanism will be able to restart the reaction without repeating any of its side effects.
@@ -583,6 +744,33 @@ go { case d((x, z)) if z.nonEmpty => }
 ```
 
 This code compiles and works, and is equivalent to the more complicated pattern match.
+
+## Type mismatch "found `Any`, required `X`" with pattern variables
+
+When pattern variables have type parameters, these type parameters are replaced by `Any` due to type erasure.
+The current implementation of guard conditions in `Chymyst` is unable to recognize the type parameters that pattern variables actually have.
+This limitation does not affect the reaction body; however, guard conditions involving these pattern variables will suffer from incorrect type parameter `Any`.
+
+An (artificial) example is shown in this reaction:
+
+```scala
+val a = m[Option[Int]]
+
+go { case a(p@Some(_)) if 1 - p.get > 0 => ??? }
+
+```
+
+The pattern variable `p` has type `Some[Int]`, which has a type parameter set to `Int`.
+The reaction body is able to evaluate expressions such as `1 - p.get` with no problems, with `p.get` typed as `Int`.
+However, the guard condition as implemented by `Chymyst` suffers from type erasure,
+and so the type of `p` within the guard expression becomes `Some[Any]`.
+Therefore, `p.get` is typed as `Any`, and the presence of `1 - p.get` in the guard condition
+will cause a compile-time error "type mismatch: found `Any`, required `Int`".
+
+Several workarounds are possible:
+ 
+- Avoid using pattern variables whose type is parameterized; in this example, write `a(Some(x))` instead of `a(p@Some(_))`.
+- Rewrite some expressions so that compilation succeeds; in this example, `p.get < 1` would compile without errors, despite the type `Any`.
 
 # Implementation notes
 
