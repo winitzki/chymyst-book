@@ -146,7 +146,7 @@ The reply action can check whether the timeout occurred:
 val f = b[Unit, Int]
 go { f(_, reply) =>
 // offer to reply 123 and return true if there was no timeout
-  val status = reply.checkTimeout(123)
+  val status = reply(123)
   if (status) ???
 }
 
@@ -188,8 +188,8 @@ Each reaction site and each reaction can be run on a different, separate thread 
 The user can control the number of threads in thread pools.
 
 ```scala
-val tp1 = new FixedPool(1)
-val tp8 = new SmartPool(8)
+val tp1 = FixedPool(1)
+val tp8 = BlockingPool(8)
 
 site(tp8)( // reaction site runs on tp8
   go { case a(x) => ... } onThreads tp1, // this reaction runs on tp1
@@ -198,7 +198,7 @@ site(tp8)( // reaction site runs on tp8
 
 ```
 
-Thread pools are "smart" because they will automatically adjust the number of active threads if blocking operations occur.
+The thread pools of class `BlockingPool` are called "blocking" because they will automatically adjust the number of active threads if blocking operations occur.
 So, blocking operations do not decrease the degree of parallelism.
 
 ## Graceful shutdown
@@ -206,7 +206,7 @@ So, blocking operations do not decrease the degree of parallelism.
 When a `Chymyst`-based program needs to exit, it can shut down the thread pools that run reactions.
 
 ```scala
-val tp = new SmartPool(8)
+val tp = BlockingPool(8)
 
 // define reactions and run them
 
@@ -214,9 +214,11 @@ tp.shutdownNow() // all reactions running on `tp` will stop
 
 ```
 
-## Fair nondeterminism
+## Nondeterministic choice
 
-Whenever a molecule can start several reactions, the reaction is chosen at random.
+Whenever a molecule can start several reactions, the reaction is chosen arbitrarily.
+
+Whenever a reaction can consume several different copies of input molecules, the actually consumed copies are chosen arbitrarily. 
 
 ## Fault tolerance
 

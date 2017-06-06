@@ -1,6 +1,6 @@
 <link href="{{ site.github.url }}/tables.css" rel="stylesheet" />
 
-# Concurrency in Reactions: Declarative concurrent programming in Scala
+# Concurrency in Reactions: Declarative Scala multithreading with `Chymyst`
 
 [Preface](chymyst-preface.md)
 
@@ -26,5 +26,4 @@
 
 [Appendix A: From actors to reactions: The chemical machine explained through the Actor model](chymyst-actor.md)
 
-[Other work on Join Calculus](other_work.md)
-
+[Appendix B: Other work on Join Calculus](other_work.md)

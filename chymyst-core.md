@@ -111,7 +111,7 @@ If a blocking molecule was emitted with a timeout, but no reaction has started w
 
 It can also happen that a reaction started but the timeout was reached before the reaction performed the reply.
 In that case, the reaction that replies to a blocking molecule can detect whether the reply was not received due to timeout.
-This is achieved with the `checkTimeout()` method of the reply emitter:
+This is achieved by checking the `Boolean` value returned by the reply emitter:
 
 ```scala
 import scala.concurrent.duration.DurationInt
@@ -119,14 +119,18 @@ val a = m[Unit]
 val b = m[Boolean]
 val f = b[Int, String]
 
-site ( go { case f(x, r) + a(_) => val status = r.checkTimeout(x); b(status) } )
+site ( go { case f(x, r) + a(_) => val status = r(x); b(status) } )
 
 val result: Option[String] = f.timeout(10)(100 millis)
 
 ```
 
-In this example, the call `r.checkTimeout(x)` performs the same reply action as `r(x)`, and additionally a `Boolean` status value is returned.
-The status value will be `true` only if the caller has actually received the reply and did not time out.
+In this example, the `status` value will be `true` only if the caller has actually received the reply and did not time out.
+
+If the caller has timed out before the reply was sent (or even before the replying reaction started), the `status` value will be `false`.
+
+Reply emitters are instances of class `ReplyEmitter[T, R]` which extends `R => Boolean`.
+For this reason, reply emitters look like functions that return a `Boolean` value.
 
 ## Debugging
 
@@ -198,16 +202,16 @@ val reaction = go { case c(Some(x)) + d((y, "hello", true)) if x == y ⇒ c(Some
 Pattern-matching is a particular case of a guard condition that constrains the values of a reaction's input molecules.
 A reaction can have guard conditions of three types:
 
-1. Molecule predicates
+1. Single-molecule guards
 2. Cross-molecule guards
 3. Static guards
 
 The chemical machine will run a reaction only if it can find suitable input molecules such that all the guard conditions hold.
 
-#### Molecule predicates
+#### Single-molecule guards
 
-Molecule predicates are conditions that constrain the value carried by a single input molecule.
-For example,
+**Single-molecule** guards are conditions that constrain the value carried by a single input molecule.
+For example, the reaction
 
 ```scala
 go { case a(x) + c(y) if x > 0 ⇒ ??? }
@@ -215,21 +219,21 @@ go { case a(x) + c(y) if x > 0 ⇒ ??? }
 ```
 
 declares a guard condition that constrains the input molecule value `x`.
-We call this a **molecule predicate** for the input molecule `a(x)`.
+We call this condition a single-molecule guard for the input molecule `a(x)`.
 
-Another example of a molecule predicate is
+Another example of a single-molecule guard is
 
 ```scala
 go { case a(Some(x)) + c(y) ⇒ ??? }
 
 ```
 
-The requirement that the value of the molecule `a()` should be of the form `Some(x)` is a molecule predicate
+The condition that the value of the molecule `a()` should be of the form `Some(x)` is a single-molecule guard
 because it constrains only the value of one molecule.
 
 #### Cross-molecule guards
 
-Cross-molecule guards are conditions that constrain _several_ molecule values at once.
+**Cross-molecule** guards are conditions that constrain _several_ molecule values at once.
 An example is
 
 ```scala
@@ -237,12 +241,12 @@ go { case a(x) + c(y) if x > y ⇒ ??? }
 
 ```
 
-As a rule, the chemical machine will schedule such reactions more slowly because it must find a pair of molecule copies `a(x)` and `c(y)` such that the condition holds.
+As a rule, the chemical machine will schedule such reactions more slowly because it must find a _pair_ of molecules `a(x)` and `c(y)` such that the condition holds.
 If many copies of `a()` and `c()` are present in the soup, the search for a suitable pair can take a long time.
 
 #### Static guards
 
-Static guards are conditions that are independent of input molecule values.
+**Static** guards are conditions that are independent of input molecule values.
 For example,
 
 ```scala
@@ -481,7 +485,7 @@ To facilitate this control, `Chymyst Core` implements the thread pool feature.
 Each RS uses a special thread pool (the `reactionPool`).
 The reaction pool contains two sets of threads:
 
-1. A common thread executor for running reactions. This thread executor can have one or more threads.
+1. A common `ThreadPoolExecutor` for running reactions. This thread executor (called `workerExecutor` in `Pool.scala`) can have one or more threads.
 2. A single, dedicated scheduler thread for deciding new reactions (called the `schedulerExecutor` in the code).
 
 By default, the reaction sites use a statically allocated reaction pool that is shared by all RSs.
@@ -499,17 +503,17 @@ Thus, creating many thousands of new reaction pools is impossible.
 A thread pool is created like this:
 
 ```scala
-val tp = new SmartPool(8)
+val tp = BlockingPool(8)
 
 ```
 
 This initializes a thread pool with 8 initial threads.
 
 As a convenience, the method `cpuCores` can be used to determine the number of available CPU cores.
-This value is used by `SmartPool`'s default constructor.
+This value is used by `BlockingPool`'s default constructor.
 
 ```scala
-val tp1 = new SmartPool() // same as new SmartPool(cpuCores)
+val tp1 = BlockingPool() // same as BlockingPool(cpuCores)
 
 ```
 
@@ -517,7 +521,7 @@ Another available reaction pool is `FixedPool`.
 This pool holds a fixed, never changing number of reaction threads (and a single, dedicated scheduler thread).
 
 ```scala
-val tp1 = new FixedPool(4) // 4 threads for reactions, one thread for scheduler
+val tp1 = FixedPool(4) // 4 threads for reactions, one thread for scheduler
 
 ```
 
@@ -526,7 +530,7 @@ val tp1 = new FixedPool(4) // 4 threads for reactions, one thread for scheduler
 The `site()` call can take an additional argument that specifies a thread pool for all reactions at this RS.
 
 ```scala
-val tp = new SmartPool(8)
+val tp = BlockingPool(8)
 
 val a = m[Unit]
 val c = m[Unit]
@@ -542,9 +546,9 @@ site(tp)(
 When it is desired that a particular reaction should be scheduled on a particular thread pool, the `onThreads()` method can be used.
 
 ```scala
-val tp = new SmartPool(8)
+val tp = BlockingPool(8)
 
-val tp2 = new SmartPool(2)
+val tp2 = BlockingPool(2)
 
 val a = m[Unit]
 val c = m[Unit]
@@ -555,31 +559,26 @@ site(tp)(
  go { case c(_) => ... }, // this reaction will run on `tp`
 )
 
-// Wait until all done.
-tp.shutdownNow()
-tp2.shutdownNow()
-
 ```
 
-By default, all sites will use the `defaultReactionPool`.
+By default, all sites will use the `defaultPool`.
 
 If the reaction pool is specified for a particular RS, all reactions in that RS will use that thread pool, unless a reaction has its own `onTreads()` specification.
 
 ## Stopping a thread pool
 
-Since JVM will not quit when some threads are still active, the programmer needs to stop the thread pool when all tasks are finished and no more reactions need to be run.
+Sometimes the programmer needs to stop the thread pool imediately, so that no more reactions can be run.
 
-The method `shutdownNow()` will stop the threads in the thread pool.
+The method `shutdownNow()` will interrupt all threads in the thread pool and clear out the reaction queue.
 
 ```scala
-val tp = new SmartPool(8)
+val tp = BlockingPool(8)
 
 site(tp)(...)
 
 // Emit molecules
   ...
-// Now wait until all tasks are finished.
-
+// All work needs to be stopped now.
 tp.shutdownNow()
 
 ```
@@ -587,9 +586,12 @@ tp.shutdownNow()
 Thread pools also implement the `AutoCloseable` interface.
 The `close()` method is an alias to `shutdownNow()`.
 
+Thread pools will stop their threads when idle for a certain time `Pool.recycleThreadTimeMs()`.
+So usually it is not necessary to shut down the pools manually.
+
 ## Blocking calls and thread pools
 
-The `SmartPool` class is used to create thread pools for reactions that may generate a lot of blocking molecules.
+The `BlockingPool` class is used to create thread pools for reactions that may generate a lot of blocking molecules.
 This thread pool will automatically increment the pool size when a blocking molecule is emitted, and decrement it when the blocking molecule receives a reply and unblocks the calling process.
 
 This functionality is available with the `BlockingIdle` function.
@@ -603,7 +605,7 @@ The user needs to employ `BlockingIdle` explicitly only when a reaction contains
 Example:
 
 ```scala
-val pool = new SmartPool(8)
+val pool = BlockingPool(8)
 
 val a = m[Url]
 val b = m[Client]
