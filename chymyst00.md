@@ -2,6 +2,8 @@
 
 # Concurrency in Reactions: Declarative Scala multithreading with `Chymyst`
 
+(c) by Sergei Winitzki, 2016-2017
+
 [Preface](chymyst-preface.md)
 
 [Chapter 0: Quick start](chymyst-quick.md)
@@ -14,7 +16,7 @@
 
 [Chapter 4: Molecules and emitters, in depth](chymyst04.md)
 
-[Chapter 5: Reaction constructors](chymyst05.md)
+[Chapter 5: Advanced features: reaction constructors and pipelining](chymyst05.md)
 
 [Chapter 6: Conceptual overview of concurrency](concurrency.md) / [Nontechnical version](concurrency-nontechnical.md)
 
